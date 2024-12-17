@@ -92,7 +92,7 @@ python launch.py --config configs/texgen_test.yaml --test --gpu 0 data.eval_scen
 The results will be put in `<exp_root_dir>/<name>/<tag>@<time>`. 
 
 #### Model Checkpoint
-You can download our [trained checkpoint](), and put it under `assets/checkpoints`.
+You can download our [trained checkpoint](https://huggingface.co/Andyx/TEXGen/tree/main), and put it under `assets/checkpoints`. Note that the released model is trained with Flow Matching which is different from the paper version, since we find it more stable. Check this [blog](https://diffusionflow.github.io/) to understand the connection between Flow Matching and Diffusion.
 
 During the whole process, some components (e.g. CLIP, time scheduler) from HuggingFace are required. So make sure you have the access to HF or to their checkpoints. The relevant components are listed here:
 ```text
