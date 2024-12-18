@@ -52,7 +52,7 @@ The training process requires at least one GPU with VRAM bigger than 40GB. We te
 #### Docker Image
 For convenience, it is welcomed to use our built-up docker image to run TEXGen.
 ```shell
-docker run -it anonymous076/texgen_release bash 
+docker run -it yuanze1024/texgen_release:v1 bash 
 ```
 
 #### From Scratch
