@@ -202,6 +202,8 @@ class PointUVNet(BaseModule):
         cond_image_info = {
             "rgb": image_info["rgb_cond"],
             "mvp_mtx": image_info["mvp_mtx_cond"],
+            "partial_texture": image_info["partial_texture"],
+            "partial_texture_mask": image_info["partial_texture_mask"],
         }
 
         # for cfg
@@ -212,13 +214,20 @@ class PointUVNet(BaseModule):
             clip_embedding = condition_drop * clip_embedding_null + (1 - condition_drop) * clip_embeddings[i]
             input_embeddings.append(clip_embedding)
         tr.start("bake")
-        with torch.no_grad():
-            baked_texture, baked_weights = bake_image_feature_to_uv(self.ctx, mesh, cond_image_info, position_map.permute(0, 2, 3, 1))
-            if data_normalization:
-                baked_texture = (2 * baked_texture - 1).detach()
-            else:
-                baked_texture = baked_texture.detach()
-            baked_weights = baked_weights.detach()
+        # * render partial texture
+        # with torch.no_grad():
+        #     baked_texture, baked_weights = bake_image_feature_to_uv(self.ctx, mesh, cond_image_info, position_map.permute(0, 2, 3, 1))
+        #     if data_normalization:
+        #         baked_texture = (2 * baked_texture - 1).detach()
+        #     else:
+        #         baked_texture = baked_texture.detach()
+        #     baked_weights = baked_weights.detach()
+        # * get partial texture
+        if data_normalization:
+            baked_texture = (2 * cond_image_info["partial_texture"] - 1).permute(0, 3, 1, 2).float().detach()
+        else:
+            baked_texture = cond_image_info["partial_texture"].permute(0, 3, 1, 2).float().detach()
+        baked_weights = cond_image_info["partial_texture_mask"].detach()
         tr.end("bake")
 
         x_concat = torch.cat([x_dense, position_map, baked_texture, baked_weights], dim=1)
@@ -294,17 +303,23 @@ class PointUVNet(BaseModule):
 
         if self.cfg.skip_input:
             if self.cfg.skip_type == "baked_texture":
+                # 直接将输出 x_output 与烘焙纹理 baked_texture 按权重 baked_weights 相加
                 return x_output + baked_weights * baked_texture, addition_info
             elif self.cfg.skip_type == "noise_input":
+                # 直接将输出 x_output 与输入噪声 skip_x 相加
                 return x_output + skip_x, addition_info
             elif self.cfg.skip_type == "adaptive":
+                # 从条件嵌入中学习两个缩放因子
                 skip_scale = self.ada_skip_scale(condition_embedding)
                 x0_scale, input_scale = skip_scale.chunk(2, dim=1)
                 x0_scale = x0_scale.unsqueeze(-1).unsqueeze(-1)
                 input_scale = input_scale.unsqueeze(-1).unsqueeze(-1)
+                
+                # 从特征图中学习两个缩放图
                 skip_map = self.ada_skip_map(torch.cat([x_concat, x_dense], dim=1))
                 output_scale_map, skip_scale_map = skip_map.chunk(2, dim=1)
 
+                # 计算最终输出
                 x1 = (1-output_scale_map) * x_output
                 x2 = skip_scale_map * (x0_scale * baked_texture + input_scale * skip_x)
                 x_output = x1 + x2

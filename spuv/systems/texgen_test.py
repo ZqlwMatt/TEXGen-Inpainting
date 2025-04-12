@@ -12,6 +12,21 @@ from spuv.utils.snr_utils import compute_snr_from_scheduler, get_weights_from_ti
 from spuv.utils.mesh_utils import uv_padding
 from spuv.utils.nvdiffrast_utils import *
 from spuv.systems.texgen_base import TEXGenDiffusion as TEXGenBaseSystem
+from PIL import Image
+from kornia.morphology import dilation
+
+
+def save_image(image, name):
+    """Save image to png file
+
+    Args:
+        image (torch.Tensor): image to save, shape: (C, H, W)
+        name (str): name of the image
+    """
+    image_np = (image.permute(1, 2, 0).cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
+    if image_np.shape[-1] == 1:  # If single channel, convert to 3 channels
+        image_np = np.repeat(image_np, 3, axis=-1)
+    Image.fromarray(image_np).save(name)
 
 
 class TEXGenDiffusion(TEXGenBaseSystem):
@@ -29,7 +44,7 @@ class TEXGenDiffusion(TEXGenBaseSystem):
 
     def get_conditional_flow(self, noise, sample, t):
         t = t[:, None, None, None]
-        return (1 - (1 - self.sigma_min) * t) * noise + t * sample
+        return (1 - (1 - self.sigma_min) * t) * noise + t * sample # use t, 1-t, to control the noise and known UV
 
     def prepare_diffusion_data(self, batch, noisy_images=None):
         device = get_device()
@@ -38,7 +53,7 @@ class TEXGenDiffusion(TEXGenBaseSystem):
         uv_shape = (batch_size, uv_channel, uv_height, uv_width)
         if self.training or "uv_map" in batch:
             sample_images = rearrange(batch["uv_map"], "B H W C -> B C H W").to(dtype=self.dtype)
-            if self.cfg.data_normalization:
+            if self.cfg.data_normalization: # default is True
                 sample_images = (sample_images * 2 - 1)
         else:
             sample_images = None
@@ -51,6 +66,10 @@ class TEXGenDiffusion(TEXGenBaseSystem):
             )
             mask_map = rearrange(mask_map_, "B H W C-> B C H W").to(dtype=self.dtype)
             position_map = rearrange(position_map_, "B H W C -> B C H W").to(dtype=self.dtype)
+            # visualize mask_map and position_map
+            print(mask_map.shape, position_map.shape)
+            save_image(mask_map[0], "mask_map.png")
+            save_image(position_map[0], "position_map.png")
         else:
             mask_map = rearrange(batch["mask_map"], "B H W -> B 1 H W").to(dtype=self.dtype)
             position_map = rearrange(batch["position_map"], "B H W C -> B C H W").to(dtype=self.dtype)
@@ -67,11 +86,23 @@ class TEXGenDiffusion(TEXGenBaseSystem):
         else:
             noise = torch.randn(uv_shape, device=device, dtype=self.dtype)
             if sample_images is not None:
+                spuv.info("Find sample_images, blend with noise")
                 noisy_images = self.get_conditional_flow(
                         noise,
                         sample_images,
                         timesteps
                     )
+                if "uv_map" in batch:   
+                    uv_mask = (batch["uv_map"] > 0).any(dim=-1, keepdim=True).bool()
+                    uv_mask = rearrange(uv_mask, "B H W C -> B C H W").to(dtype=self.dtype)
+                    # kernel = torch.ones(1, 1, device=mask_map.device, dtype=mask_map.dtype)
+                    # uv_mask = dilation(uv_mask, kernel)
+                    uv_mask = (uv_mask.bool() & mask_map.bool()).float()
+                    save_image(uv_mask[0], "uv_mask.png")
+                    # only update empty UV
+                    # spuv.info("[New] Adaptively Update mask_map")
+                    # mask_map = mask_map * (1 - uv_mask)
+                    original_mask_map = uv_mask
             else:
                 noisy_images = noise
 
@@ -83,6 +114,7 @@ class TEXGenDiffusion(TEXGenBaseSystem):
             "sample_images": sample_images,
             "position_map": position_map,
             "mask_map": mask_map,
+            "original_mask_map": original_mask_map,
             "timesteps": timesteps,
             "noise": noise,
             "noisy_images": noisy_images,
@@ -99,7 +131,7 @@ class TEXGenDiffusion(TEXGenBaseSystem):
         mask_map = diffusion_data["mask_map"]
         position_map = diffusion_data["position_map"]
         timesteps = diffusion_data["timesteps"]
-        input_tensor = diffusion_data["noisy_images"]
+        input_tensor = diffusion_data["noisy_images"] # update `noisy_images`: x_t
 
         text_embeddings = condition["text_embeddings"]
         image_embeddings = condition["image_embeddings"]
@@ -110,6 +142,8 @@ class TEXGenDiffusion(TEXGenBaseSystem):
         image_info = {
             'mvp_mtx_cond': condition["mvp_mtx_cond"],
             'rgb_cond': condition["rgb_cond"],
+            'partial_texture': condition["partial_texture"],
+            'partial_texture_mask': diffusion_data["original_mask_map"],
         }
 
         if condition_drop is None and self.training:
@@ -142,7 +176,9 @@ class TEXGenDiffusion(TEXGenBaseSystem):
         # Online rendering the condition image
         background_color = self.render_background_color
         rgb_cond = render_batched_meshes(self.ctx, mesh, uv_map_gt, mvp_mtx_cond, image_height, image_width, background_color)
-
+        save_image(uv_map_gt[0].permute(2, 0, 1), "uv_map_gt.png")
+        save_image(rgb_cond[0, 0].permute(2, 0, 1), "rgb_cond.png")
+        
         if self.cfg.cond_rgb_perturb and self.training:
             B, Nv, H, W, C = rgb_cond.shape
             rgb_cond = rearrange(rgb_cond, "B Nv H W C -> (B Nv) C H W")
@@ -161,6 +197,7 @@ class TEXGenDiffusion(TEXGenBaseSystem):
             "text_embeddings": text_embeddings,
             "image_embeddings": image_embeddings,
             "prompt": prompt,
+            "partial_texture": uv_map_gt,
         }
 
         return condition_info
@@ -234,6 +271,7 @@ class TEXGenDiffusion(TEXGenBaseSystem):
 
     @torch.no_grad()
     def test_step(self, batch, batch_idx):
+        # pytorch.lightning 会进到这个函数
         if batch is None:
             spuv.info("Received None batch, skipping.")
             return None
@@ -262,14 +300,19 @@ class TEXGenDiffusion(TEXGenBaseSystem):
         else:
             img = value * texture_map_outputs["mask_map"]
         # Important to flip the uv map for possible meshlab loading, for rendering using NvDiffRasterizer, do not flip!
-        flip_img = torch.flip(img, dims=[2])
+        # concat with gt.
+        spuv.info("[New] Inpainting with original mask")
+        final_img = img * (1 - texture_map_outputs["original_mask_map"]) + \
+                    (texture_map_outputs["gt_x0"] * 0.5 + 0.5) * texture_map_outputs["original_mask_map"]
+        flip_img = torch.flip(final_img, dims=[2])
 
         img_format = [{
             "type": "rgb",
             "img": rearrange(flip_img, "B C H W-> (B H) W C"),
             "kwargs": {"data_format": "HWC"},
         }]
-
+        
+        # save final image
         self.save_image_grid(
             f"it{self.true_global_step}-test/{save_str}.png",
             img_format,
@@ -281,10 +324,15 @@ class TEXGenDiffusion(TEXGenBaseSystem):
         for key in ["pred_x0", "gt_x0", "baked_texture"]:
             value = texture_map_outputs[key]
             if self.cfg.data_normalization:
-                img = (value * 0.5 + 0.5) * texture_map_outputs["mask_map"]
+                # try:
+                img = (texture_map_outputs["gt_x0"] * 0.5 + 0.5) * texture_map_outputs["original_mask_map"] \
+                        + (value * 0.5 + 0.5) * (1 - texture_map_outputs["original_mask_map"]) * texture_map_outputs["mask_map"]
+                # except:
+                #     spuv.info("[New] Use predicted UV (normalized)")
+                #     img = (value * 0.5 + 0.5) * texture_map_outputs["mask_map"]
             else:
                 img = value * texture_map_outputs["mask_map"]
-            # Important to flip the uv map for possible meshlab loading, for rendering using NvDiffRasterizer, do not flip!
+            # ! Important to flip the uv map for possible meshlab loading, for rendering using NvDiffRasterizer, do not flip!
             flip_img = torch.flip(img, dims=[2])
 
             img_format = [{
@@ -308,6 +356,7 @@ class TEXGenDiffusion(TEXGenBaseSystem):
 
             pad_img = uv_padding(img.squeeze(0), texture_map_outputs['mask_map'].squeeze(0).squeeze(0), iterations=2)
             
+            # dump rendered output
             render_out = render_batched_meshes(self.ctx, mesh, pad_img, mvp_mtx, height, width, background_color)
 
             img_format = [{
@@ -339,6 +388,7 @@ class TEXGenDiffusion(TEXGenBaseSystem):
         t_span=torch.linspace(0, 1, test_num_steps, device=device, dtype=self.dtype)
         delta = 1.0 / test_num_steps
 
+        # denoise
         for i, t in enumerate(t_span):
             timestep = t.repeat(B)
             diffusion_data["timesteps"] = timestep
@@ -348,7 +398,7 @@ class TEXGenDiffusion(TEXGenBaseSystem):
             if (
                     self.cfg.test_cfg_scale != 0.0
                     and self.cfg.guidance_interval[0] <= t <= self.cfg.guidance_interval[1]
-            ):
+            ): # cfg inference
                 uncond_step_out, _ = self(condition_info, diffusion_data, condition_drop=torch.ones(B, device=device))
                 step_out = uncond_step_out + self.cfg.test_cfg_scale * (cond_step_out - uncond_step_out)
                 # Apply guidance rescale. From paper [Common Diffusion Noise Schedules
@@ -369,6 +419,7 @@ class TEXGenDiffusion(TEXGenBaseSystem):
             "baked_texture": addition_info['baked_texture'],
             "gt_x0": diffusion_data["sample_images"],
             "mask_map": diffusion_data["mask_map"],
+            "original_mask_map": diffusion_data["original_mask_map"],
         }
 
         return texture_map_outputs

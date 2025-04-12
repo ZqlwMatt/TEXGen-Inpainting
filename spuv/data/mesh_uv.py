@@ -136,7 +136,11 @@ class ObjaverseDataset(Dataset):
         uv_data = self.all_uvs[scene_index]
         scene_id = uv_data["id"]
         data_root_dir = uv_data["root_dir"]
-        uv_dir = f"{data_root_dir}/{scene_id[:2]}/{scene_id}"
+        TEXGen_dir = f"{data_root_dir}/{scene_id[:2]}"
+        if os.path.exists(TEXGen_dir):
+            uv_dir = f"{TEXGen_dir}/{scene_id}"
+        else:
+            uv_dir = f"{data_root_dir}/{scene_id}"
         prompt = uv_data["result"]
         mesh_file_path, uv_image_path = file_from_uv_dir(uv_dir, self.cfg.mesh_name, self.cfg.uv_name)
 
@@ -263,7 +267,7 @@ class ObjaverseDataModule(pl.LightningDataModule):
     def test_dataloader(self) -> DataLoader:
         return DataLoader(
             self.test_dataset,
-            batch_size=self.cfg.eval_batch_size,
+            batch_size=self.cfg.eval_batch_size, # 1
             num_workers=self.cfg.num_workers,
             shuffle=False,
             collate_fn=self.test_dataset.collate,

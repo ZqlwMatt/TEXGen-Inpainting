@@ -4,8 +4,7 @@
 # Ignore Python byte-compiled files
 __pycache__/
 
-# Ingore .sh
-*.sh
-
 output*/
 assets/checkpoints/*.ckpt
+
+*.whl
